@@ -28,12 +28,20 @@ Per-wav outputs (only those whose flags are set):
                                   T ≈ duration_seconds × 50 (20ms frame rate).
                                   (Opt-in via --save-frames.)
 
-Audio is resampled from 44.1 kHz → 16 kHz and processed in 30-second segments
-(Whisper's native window; zero-padded if shorter). Segment outputs are
-concatenated along time to reconstruct the full temporal sequence.
+Transcription uses the HuggingFace ASR pipeline with 30s chunks and 5s
+stride for long-form alignment, and Whisper's built-in temperature
+fallback + `no_repeat_ngram_size=5` guardrail to prevent degenerate
+decoder loops.
+
+Encoder-feature extraction still segments the audio into 30s chunks
+(Whisper's native log-mel window) and zero-pads the final segment, then
+trims the concatenated hidden states back to the real audio length.
+Padding is harmless here because only encoder activations are consumed
+— no decoder generation runs on the padded frames.
 
 Output files are saved alongside the source wav files, mirroring the
-directory structure of audio_lanzhou_2015/.
+directory structure of audio_lanzhou_2015/. Existing outputs are
+overwritten on every run.
 
 Usage:
     python scripts/extract_whisper_features.py                              # BOTH transcripts, no encoder features (default)
@@ -60,7 +68,12 @@ import soundfile as sf
 import torch
 import torchaudio
 from tqdm import tqdm
-from transformers import WhisperModel, WhisperProcessor, WhisperForConditionalGeneration
+from transformers import (
+    WhisperModel,
+    WhisperProcessor,
+    WhisperForConditionalGeneration,
+    pipeline,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -79,6 +92,10 @@ TARGET_SR = 16_000                        # Whisper expects 16 kHz
 SEGMENT_SECONDS = 30                      # Whisper's native input window
 SEGMENT_SAMPLES = TARGET_SR * SEGMENT_SECONDS  # 480,000 samples per segment
 
+# Long-form transcription chunking (HF ASR pipeline).
+CHUNK_LENGTH_S = 30    # Whisper's native window
+STRIDE_LENGTH_S = 5    # overlap on each side for long-form stitching
+
 # Source language of MODMA audio. Whisper will translate → English.
 SOURCE_LANGUAGE = "zh"   # Mandarin Chinese — source language of MODMA audio
 
@@ -88,6 +105,22 @@ SOURCE_LANGUAGE = "zh"   # Mandarin Chinese — source language of MODMA audio
 TASK_TO_LANG_CODE = {
     "transcribe": SOURCE_LANGUAGE,
     "translate": "en",
+}
+
+# Generation guardrails. These are applied inside the HF ASR pipeline.
+#   - temperature tuple → temperature fallback (retry at higher T if the
+#     greedy decode tripped compression_ratio_threshold or logprob_threshold).
+#   - no_repeat_ngram_size=5 → mechanically breaks degenerate loops like
+#     "红红红红红红…" without distorting normal prose.
+#   - condition_on_previous_text=False → prevents errors in one chunk from
+#     biasing the next (Whisper's default True setting is a known driver of
+#     cascading hallucinations on MODMA-style long, quiet speech).
+GEN_KWARGS = {
+    "no_repeat_ngram_size": 5,
+    "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    "compression_ratio_threshold": 2.4,
+    "logprob_threshold": -1.0,
+    "condition_on_previous_text": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -115,17 +148,13 @@ def load_and_resample(wav_path: Path, target_sr: int = TARGET_SR) -> torch.Tenso
 
     Returns a 1-D float32 tensor of audio samples.
     """
-    # soundfile returns (num_samples,) for mono or (num_samples, channels)
-    # for multi-channel. Always return float32.
     data, sr = sf.read(str(wav_path), dtype="float32", always_2d=False)
 
     if data.ndim == 2:
-        # Mix to mono by averaging channels
         data = data.mean(axis=1)
 
     waveform = torch.from_numpy(np.ascontiguousarray(data))  # (num_samples,) float32
 
-    # Resample if needed
     if sr != target_sr:
         waveform = torchaudio.functional.resample(
             waveform, orig_freq=sr, new_freq=target_sr
@@ -134,16 +163,17 @@ def load_and_resample(wav_path: Path, target_sr: int = TARGET_SR) -> torch.Tenso
     return waveform  # (num_samples,)
 
 # ---------------------------------------------------------------------------
-# Segmentation
+# Segmentation (encoder-feature path only)
 # ---------------------------------------------------------------------------
 
 
 def segment_audio(waveform: torch.Tensor, segment_samples: int) -> list[torch.Tensor]:
     """
-    Split waveform into fixed-length segments, zero-padding the last one
-    if it's shorter than segment_samples.
-
-    Returns a list of 1-D tensors, each of length segment_samples.
+    Split waveform into fixed-length 30s segments, zero-padding the last one
+    if it's shorter. Only used when extracting encoder hidden states (which
+    require a fixed 3000-frame log-mel input); the transcription path now
+    uses the HF pipeline's own chunking with overlap and no generation on
+    padded tails.
     """
     total = waveform.shape[0]
     segments = []
@@ -166,8 +196,8 @@ def segment_audio(waveform: torch.Tensor, segment_samples: int) -> list[torch.Te
 def extract_whisper_for_file(
     wav_path: Path,
     encoder_model: WhisperModel,
-    asr_model: WhisperForConditionalGeneration,
     processor: WhisperProcessor,
+    asr_pipe,
     device: torch.device,
     layer_indices: list[int],
     tasks: list[str],
@@ -180,7 +210,9 @@ def extract_whisper_for_file(
     "translate") produces a separate transcript file suffixed with its output
     language code (_zh for transcribe, _en for translate).
 
-    Saves (as needed — skips individual outputs that already exist):
+    Always overwrites existing outputs.
+
+    Saves:
       - {stem}_transcript_whisper_{lang}.txt     (one per task)
       - {stem}_whisper_pooled.pt                 (only if save_pooled=True)
       - {stem}_whisper_frames.pt                 (only if save_frames=True)
@@ -197,44 +229,47 @@ def extract_whisper_for_file(
         for task in tasks
     }
 
-    # Figure out what still needs to be produced
-    need_pooled = save_pooled and not pooled_path.exists()
-    need_frames = save_frames and not frames_path.exists()
-    tasks_to_run = [t for t in tasks if not transcript_paths[t].exists()]
-
-    if not need_pooled and not need_frames and not tasks_to_run:
-        return True, "SKIP"
-
     try:
         # Load and resample audio
         waveform = load_and_resample(wav_path, TARGET_SR)
-
-        # Segment into 30s chunks (Whisper's native window)
-        segments = segment_audio(waveform, SEGMENT_SAMPLES)
+        audio_np = waveform.numpy()
         total_real_samples = waveform.shape[0]
 
         # ---------------------------------------------------------------
-        # Per-segment: encoder forward (once) + decoder generation per task
+        # Transcription — HF pipeline with chunking + stride + guardrails
         # ---------------------------------------------------------------
-        all_segment_hidden = []  # list of (n_layers, T_seg, 1280) tensors
-        transcript_pieces: dict[str, list[str]] = {t: [] for t in tasks_to_run}
-
-        want_encoder = need_pooled or need_frames
-
-        # Match input dtype to the model's parameter dtype (handles the case
-        # where the model ended up in fp16 while the processor returns fp32).
-        model_dtype = next(asr_model.parameters()).dtype
-
-        for seg in segments:
-            inputs = processor(
-                seg.numpy(),
-                sampling_rate=TARGET_SR,
-                return_tensors="pt",
+        for task in tasks:
+            result = asr_pipe(
+                audio_np,
+                generate_kwargs={
+                    "task": task,
+                    "language": SOURCE_LANGUAGE,
+                    **GEN_KWARGS,
+                },
             )
-            input_features = inputs.input_features.to(device=device, dtype=model_dtype)
+            text = (result.get("text") or "").strip()
+            transcript_paths[task].write_text(text + "\n", encoding="utf-8")
 
-            # --- Encoder forward (only if we still need pooled/frames) ---
-            if want_encoder:
+        # ---------------------------------------------------------------
+        # Encoder features (opt-in) — fixed 30s log-mel windows
+        # ---------------------------------------------------------------
+        want_encoder = save_pooled or save_frames
+        if want_encoder:
+            segments = segment_audio(waveform, SEGMENT_SAMPLES)
+            all_segment_hidden = []
+
+            # Match input dtype to the encoder's parameter dtype.
+            model_dtype = next(encoder_model.parameters()).dtype
+
+            for seg in segments:
+                inputs = processor(
+                    seg.numpy(),
+                    sampling_rate=TARGET_SR,
+                    return_tensors="pt",
+                )
+                input_features = inputs.input_features.to(
+                    device=device, dtype=model_dtype
+                )
                 encoder_outputs = encoder_model.encoder(
                     input_features,
                     output_hidden_states=True,
@@ -248,38 +283,20 @@ def extract_whisper_for_file(
                 )  # (n_layers, T_seg, 1280)
                 all_segment_hidden.append(selected)
 
-            # --- Decoder generation, once per requested task ---
-            for task in tasks_to_run:
-                forced_decoder_ids = processor.get_decoder_prompt_ids(
-                    language=SOURCE_LANGUAGE,
-                    task=task,
-                )
-                generated_ids = asr_model.generate(
-                    input_features,
-                    forced_decoder_ids=forced_decoder_ids,
-                    max_new_tokens=440,
-                )
-                text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-                transcript_pieces[task].append(text.strip())
-
-        # ---------------------------------------------------------------
-        # Save encoder features
-        # ---------------------------------------------------------------
-        if want_encoder:
             full_hidden = torch.cat(all_segment_hidden, dim=1)  # (n_layers, T_total, 1280)
             # Whisper encoder outputs ~50 frames/sec (20 ms/frame).
             real_frames = int(total_real_samples / TARGET_SR * 50)
             real_frames = min(real_frames, full_hidden.shape[1])
             full_hidden = full_hidden[:, :real_frames, :]
 
-            if need_pooled:
+            if save_pooled:
                 pooled = full_hidden.float().mean(dim=1)  # (n_layers, 1280) float32
                 torch.save(
                     {"pooled": pooled, "layers": layer_indices},
                     str(pooled_path),
                 )
 
-            if need_frames:
+            if save_frames:
                 torch.save(
                     {
                         "hidden_states": full_hidden.half(),  # (n_layers, T, 1280) float16
@@ -290,13 +307,6 @@ def extract_whisper_for_file(
                     },
                     str(frames_path),
                 )
-
-        # ---------------------------------------------------------------
-        # Save transcripts
-        # ---------------------------------------------------------------
-        for task in tasks_to_run:
-            full_transcript = " ".join(p for p in transcript_pieces[task] if p).strip()
-            transcript_paths[task].write_text(full_transcript + "\n", encoding="utf-8")
 
         return True, "OK"
 
@@ -312,8 +322,8 @@ def extract_whisper_for_file(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Extract frozen Whisper encoder hidden states and English "
-            "transcripts from MODMA audio files."
+            "Extract frozen Whisper encoder hidden states and Mandarin/"
+            "English transcripts from MODMA audio files."
         )
     )
     parser.add_argument(
@@ -431,9 +441,6 @@ def main():
     logger.info(f"Loading {MODEL_NAME} (this may take a minute on first run)...")
     processor = WhisperProcessor.from_pretrained(MODEL_NAME)
 
-    # Separate model handles for encoder features and generation. Both wrap
-    # the same weights under the hood via `from_pretrained`, but keeping two
-    # objects keeps the encoder path and the ASR generation path tidy.
     # Force float32 to avoid fp16 bias/input mismatches (seen on MPS).
     encoder_model = (
         WhisperModel.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
@@ -452,10 +459,27 @@ def main():
     logger.info("Model loaded and set to eval mode (frozen).")
 
     # ------------------------------------------------------------------
+    # Build long-form ASR pipeline (chunking + stride + guardrails)
+    # ------------------------------------------------------------------
+    # The pipeline handles Whisper's canonical long-form decoding: it slices
+    # the audio into 30s chunks with 5s of overlap on each side, decodes each
+    # chunk, and stitches outputs on matching token timestamps. Words that
+    # straddle a boundary end up in at least one chunk's interior, and the
+    # padded tail is never decoded as if it were real speech.
+    asr_pipe = pipeline(
+        task="automatic-speech-recognition",
+        model=asr_model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        chunk_length_s=CHUNK_LENGTH_S,
+        stride_length_s=STRIDE_LENGTH_S,
+        torch_dtype=torch.float32,
+        device=device,
+    )
+
+    # ------------------------------------------------------------------
     # Resolve layers
     # ------------------------------------------------------------------
-    # Whisper-large-v3 has 32 encoder transformer layers → hidden_states tuple
-    # of length 33 (index 0 = post-conv embedding, 1..32 = transformer layers).
     n_encoder_layers = encoder_model.config.encoder_layers
     n_hidden_states = n_encoder_layers + 1  # includes post-conv embedding
 
@@ -484,20 +508,26 @@ def main():
             f"{{stem}}_transcript_whisper_{TASK_TO_LANG_CODE[t]}.txt" for t in tasks
         )
     )
+    logger.info(
+        f"Long-form chunking: chunk_length_s={CHUNK_LENGTH_S}, "
+        f"stride_length_s={STRIDE_LENGTH_S}"
+    )
+    logger.info(f"Generation guardrails: {GEN_KWARGS}")
+    logger.info("Overwrite policy: existing output files are OVERWRITTEN.")
 
     # ------------------------------------------------------------------
     # Process all wav files
     # ------------------------------------------------------------------
     t_start = time.time()
-    n_ok, n_skip, n_fail = 0, 0, 0
+    n_ok, n_fail = 0, 0
     failures = []
 
     for wav_path in tqdm(wav_files, desc="Extracting Whisper features", unit="file"):
         success, msg = extract_whisper_for_file(
             wav_path=wav_path,
             encoder_model=encoder_model,
-            asr_model=asr_model,
             processor=processor,
+            asr_pipe=asr_pipe,
             device=device,
             layer_indices=layer_indices,
             tasks=tasks,
@@ -506,10 +536,7 @@ def main():
         )
 
         if success:
-            if "SKIP" in msg:
-                n_skip += 1
-            else:
-                n_ok += 1
+            n_ok += 1
         else:
             n_fail += 1
             failures.append(msg)
@@ -522,9 +549,7 @@ def main():
     # ------------------------------------------------------------------
     logger.info("=" * 60)
     logger.info(f"Done in {elapsed:.1f}s")
-    logger.info(
-        f"  Extracted: {n_ok}  |  Skipped (existing): {n_skip}  |  Failed: {n_fail}"
-    )
+    logger.info(f"  Extracted (overwritten): {n_ok}  |  Failed: {n_fail}")
     logger.info(f"  Total wav files: {len(wav_files)}")
 
     if failures:
