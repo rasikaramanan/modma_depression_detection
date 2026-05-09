@@ -1,0 +1,30 @@
+﻿file_number,task,task_number,valence,notes
+1,Interview,3,positive,Response to one interview question
+2,Interview,3,positive,Response to one interview question
+3,Interview,3,positive,Response to one interview question
+4,Interview,3,positive,Response to one interview question
+5,Interview,3,positive,Response to one interview question
+6,Interview,3,positive,Response to one interview question
+7,Interview,3,neutral,Response to one interview question
+8,Interview,3,neutral,Response to one interview question
+9,Interview,3,neutral,Response to one interview question
+10,Interview,3,neutral,Response to one interview question
+11,Interview,3,neutral,Response to one interview question
+12,Interview,3,neutral,Response to one interview question
+13,Interview,3,negative,Response to one interview question
+14,Interview,3,negative,Response to one interview question
+15,Interview,3,negative,Response to one interview question
+16,Interview,3,negative,Response to one interview question
+17,Interview,3,negative,Response to one interview question
+18,Interview,3,negative,Response to one interview question
+19,Passage Reading,4,,"Read aloud  ""The North Wind and the Sun"": A phonetically balanced fable from The Principles of the International Phonetic Association, Chinese version. This passage is used worldwide in speech research because it samples the phoneme inventory of a language in a naturalistic narrative context."
+20,Word Reading,4,positive,10 common Chinese words with positive emotional connotations (selected from Hongfei Lin's affective ontology corpus)
+21,Word Reading,4,positive,10 common Chinese words with positive emotional connotations (selected from Hongfei Lin's affective ontology corpus)
+22,Word Reading,4,neutral,10 common Chinese words with neutral connotations (selected from the Chinese sentimental words extremum table)
+23,Word Reading,4,neutral,10 common Chinese words with neutral connotations (selected from the Chinese sentimental words extremum table)
+24,Word Reading,4,negative,10 common Chinese words with negative emotional connotations (selected from Hongfei Lin's affective ontology corpus)
+25,Word Reading,4,negative,10 common Chinese words with negative emotional connotations (selected from Hongfei Lin's affective ontology corpus)
+26,Picture Description,5,positive,Face image from CFAPS with a positive expression
+27,Picture Description,5,neutral,Face image from CFAPS with a neutral expression
+28,Picture Description,5,negative,Face image from CFAPS with a negative expression
+29,Picture Description,5,,"image from the TAT (Thematic Apperception Test): a ""crying woman"" scene"
