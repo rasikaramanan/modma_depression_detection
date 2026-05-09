@@ -2,12 +2,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import ElasticNetCV
-from sklearn.model_selection import GridSearchCV, LeaveOneOut, train_test_split
+from sklearn.linear_model import ElasticNet
+from sklearn.model_selection import GridSearchCV, LeaveOneOut, cross_val_predict
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-
+from sklearn.feature_selection import SelectFromModel
+from sklearn.pipeline import Pipeline
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ print(f"Loaded {ISSUES_CSV.name}: {issues.shape}")
 # Filter out datafiles flagged in data/metadata/data_quality_issues.csv
 # ---------------------------------------------------------------------------
 
-exclude_if = (issues["severity"] == "exclude")
+exclude_if = (issues["severity"] == "exclude")  & (issues["source"] == "disk_missing")
 exclude_pairs = set(zip(issues.loc[exclude_if, "subject_id"],
                         issues.loc[exclude_if, "file_number"]))
 before = len(egemaps)
@@ -55,76 +56,57 @@ subject_mean_88 = subject_mean_88.loc[subject_info.index]
 print(f"Per-subject means: {subject_mean_88.shape}")
 
 # ---------------------------------------------------------------------------
-# 80/20 train/test split, STRATIFIED by MDD/HC group
+# Build feature matrix and target — no holdout split; nested LOO below
+# uses each of the 52 subjects as the held-out point exactly once
 # ---------------------------------------------------------------------------
 
 X_all = subject_mean_88.to_numpy()              # (52, 88)
-y_all = subject_info["PHQ-9"].to_numpy()           # (52,)
-groups_all = subject_info["group"].to_numpy()       # (52,) — MDD or HC
-idx_all = subject_info.index.to_numpy()             # subject_ids
+y_all = subject_info["PHQ-9"].to_numpy()        # (52,)
 
-X_train, X_test, y_train, y_test, grp_train, grp_test, idx_train, idx_test = train_test_split(
-    X_all, y_all, groups_all, idx_all,
-    test_size=0.20, stratify=groups_all, random_state=RANDOM_STATE,
+print(f"All subjects: X={X_all.shape}  groups={subject_info['group'].value_counts().to_dict()}  "
+      f"PHQ-9 range {y_all.min()}-{y_all.max()}")
+
+# ---------------------------------------------------------------------------
+# Pipeline: standardize → Elastic-Net feature selection → SVR-RBF
+# Wrapping all three steps in a Pipeline ensures every step refits per LOO
+# fold (no feature-selection leak). Inner GridSearchCV tunes SVR hyperparams.
+# Outer LOO via cross_val_predict gives 52 honest out-of-fold predictions.
+# Note: ElasticNet uses fixed alpha/l1_ratio (not ElasticNetCV) to keep the
+# nested CV tractable — tuning EN inside outer LOO is too expensive.
+# ---------------------------------------------------------------------------
+
+pipe = Pipeline([
+    ("scale", StandardScaler()),
+    ("select", SelectFromModel(
+        ElasticNet(alpha=0.1, l1_ratio=0.7, max_iter=20000, random_state=42),
+        threshold=1e-10,
+    )),
+    ("svr", SVR(kernel="rbf")),
+])
+
+inner = GridSearchCV(
+    pipe,
+    param_grid={
+        "svr__C":       [0.1, 1, 10, 100],
+        "svr__epsilon": [0.1, 0.5, 1.0, 2.0],
+        "svr__gamma":   ["scale", "auto"],
+    },
+    cv=LeaveOneOut(), scoring="neg_mean_squared_error", n_jobs=1,
 )
 
-print(f"Train: X={X_train.shape}  groups={pd.Series(grp_train).value_counts().to_dict()}  "
-      f"PHQ-9 range {y_train.min()}-{y_train.max()}")
-print(f"Test : X={X_test.shape}   groups={pd.Series(grp_test).value_counts().to_dict()}  "
-      f"PHQ-9 range {y_test.min()}-{y_test.max()}")
-print(f"\nTest subject_ids: {list(idx_test)}")
+y_pred_oof = cross_val_predict(inner, X_all, y_all, cv=LeaveOneOut(), n_jobs=-1)
 
 # ---------------------------------------------------------------------------
-# Standardize features (fit on train only)
+# Summary stats — nested-LOO metrics + leave-one-out mean baseline
 # ---------------------------------------------------------------------------
 
-scaler = StandardScaler().fit(X_train)
-X_train_s = scaler.transform(X_train)
-X_test_s = scaler.transform(X_test)
+nested_rmse = np.sqrt(mean_squared_error(y_all, y_pred_oof))
+nested_mae  = mean_absolute_error(y_all, y_pred_oof)
+nested_r2   = r2_score(y_all, y_pred_oof)
+print(f"\nNested-LOO Pipeline (scale → EN-select → SVR)")
+print(f"  RMSE: {nested_rmse:.3f}  MAE: {nested_mae:.3f}  R²: {nested_r2:.3f}")
 
-# ---------------------------------------------------------------------------
-# Elastic Net feature selection 
-# ---------------------------------------------------------------------------
-
-loo = LeaveOneOut()
-enet_cv = ElasticNetCV(
-    l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
-    alphas=np.logspace(-3, 1, 40),
-    cv=loo, max_iter=20000, n_jobs=-1, random_state=42,
-).fit(X_train_s, y_train)
-
-# Get the nonzero feature indices
-nonzero_mask = enet_cv.coef_ != 0
-n_selected = nonzero_mask.sum()
-print(f"Elastic Net selected {n_selected} features out of 88")
-print(f"Elastic Net test RMSE: {np.sqrt(mean_squared_error(y_test, enet_cv.predict(X_test_s))):.3f}")
-
-# ---------------------------------------------------------------------------
-#  SVR-RBF on selected features
-# ---------------------------------------------------------------------------
-
-X_tr_sel = X_train_s[:, nonzero_mask]
-X_te_sel = X_test_s[:, nonzero_mask]
-
-svr_sel = GridSearchCV(
-    SVR(kernel="rbf"),
-    {"C": [0.1, 1, 10, 100], "epsilon": [0.1, 0.5, 1.0, 2.0], "gamma": ["scale", "auto"]},
-    cv=LeaveOneOut(), scoring="neg_mean_squared_error", n_jobs=-1,
-).fit(X_tr_sel, y_train)
-
-y_pred_svr_sel = svr_sel.best_estimator_.predict(X_te_sel)
-print(f"\nSVR on {n_selected} selected features → test RMSE={np.sqrt(mean_squared_error(y_test, y_pred_svr_sel)):.3f}, "
-      f"R²={r2_score(y_test, y_pred_svr_sel):.3f}")
-
-# ---------------------------------------------------------------------------
-#  Summary stats
-# ---------------------------------------------------------------------------
-y_pred = svr_sel.best_estimator_.predict(X_te_sel)
-print(f"\nBest SVR params: {svr_sel.best_params_}")
-print(f"Test RMSE: {np.sqrt(mean_squared_error(y_test, y_pred)):.3f}  "
-      f"MAE: {mean_absolute_error(y_test, y_pred):.3f}  "
-      f"R²: {r2_score(y_test, y_pred):.3f}")
-
-
-baseline_pred = np.full_like(y_test, fill_value=y_train.mean(), dtype=float)
-print(f"SVR {'beats' if (d := np.sqrt(mean_squared_error(y_test, baseline_pred)) - np.sqrt(mean_squared_error(y_test, y_pred))) > 0 else 'loses to'} mean baseline by {abs(d):.3f} RMSE")
+baseline_pred = np.array([y_all[np.arange(len(y_all)) != i].mean() for i in range(len(y_all))])
+baseline_rmse = np.sqrt(mean_squared_error(y_all, baseline_pred))
+print(f"Mean-predictor baseline (leave-one-out): RMSE {baseline_rmse:.3f}")
+print(f"SVR {'beats' if (d := baseline_rmse - nested_rmse) > 0 else 'loses to'} mean baseline by {abs(d):.3f} RMSE")
