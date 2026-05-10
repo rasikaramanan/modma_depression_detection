@@ -1,112 +1,185 @@
-from pathlib import Path
+"""
+train_svr.py
+============
+Main SVR analysis script — nested-LOO SVR-RBF regression on PHQ-9 across
+single- and multi-configuration runs.
 
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import ElasticNet
-from sklearn.model_selection import GridSearchCV, LeaveOneOut, cross_val_predict
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVR
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.feature_selection import SelectFromModel
-from sklearn.pipeline import Pipeline
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+Saves results as CSVs under results/ under a subdir corresponding to the 
+script execution's date/time
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-EGEMAPS_CSV = REPO_ROOT / "data" / "features" / "egemaps.csv"
-SUBJECT_INFO_CSV = REPO_ROOT / "data" / "metadata" / "subject_info_map.csv"
-ISSUES_CSV = REPO_ROOT / "data" / "metadata" / "data_quality_issues.csv"
+To inspect or extend the set of runs, edit _BASE_RUNS.
 
-RANDOM_STATE = 42
+Usage:
+    python scripts/train_svr.py --runs mean_predictor,whisper_only
+    python scripts/train_svr.py --alpha 0.10                     # 90% PIs
+    python scripts/train_svr.py --n-jobs 4 --n-perm-repeats 10
+"""
 
-# ---------------------------------------------------------------------------
-# Read in data from CSVs
-# ---------------------------------------------------------------------------
+from __future__ import annotations
 
-subject_info = pd.read_csv(SUBJECT_INFO_CSV,dtype={"subject_id": str},).set_index("subject_id")
-print(f"Loaded {SUBJECT_INFO_CSV.name}: {subject_info.shape}")
+import sys
 
-egemaps = pd.read_csv(EGEMAPS_CSV, dtype={"subject_id": str, "file_number": int})
-print(f"Loaded {EGEMAPS_CSV.name}: {egemaps.shape}")
+from helpers_svr import *
 
-issues = pd.read_csv(ISSUES_CSV, dtype={"subject_id": str, "file_number": int})
-print(f"Loaded {ISSUES_CSV.name}: {issues.shape}")
 
 # ---------------------------------------------------------------------------
-# Filter out datafiles flagged in data/metadata/data_quality_issues.csv
+# Run configuration
 # ---------------------------------------------------------------------------
+# Adding a run = adding an entry in _BASE_RUNS. Key can be any name, value list must
+# consist of "source names".
+# Source names refer to keys of the feature_matrices dict that enumerates all the feature 
+# sets available. Here are the source names that may be added as values (ie as elements of 
+# the value list for a particular key) in _BASE_RUNS:
+#
+#     "egemaps"                    — eGeMAPS subject-mean matrix (always loaded)
+#     "whisper"                    — whole-corpus whisper-feature subject-mean
+#     "egemaps_task_<X>"           — eGeMAPS over files belonging to task X
+#     "egemaps_valence_<v>"        — eGeMAPS over files with valence v
+#     "whisper_task_<X>"           — whisper over files belonging to task X
+#     "whisper_valence_<v>"        — whisper over files with valence v
+#     "demo"                       — demographic features (age, gender_M, edu_years)
+#
+_audio_file_map = load_audio_file_map()
+TASK_GROUPS: dict[str, set[int]] = discover_task_groups(_audio_file_map)
+VALENCES:    dict[str, set[int]] = discover_valences(_audio_file_map)
 
-exclude_if = (issues["severity"] == "exclude")  & (issues["source"] == "disk_missing")
-exclude_pairs = set(zip(issues.loc[exclude_if, "subject_id"],
-                        issues.loc[exclude_if, "file_number"]))
-before = len(egemaps)
-egemaps = egemaps[
-    ~pd.MultiIndex.from_arrays([egemaps["subject_id"], egemaps["file_number"]]).isin(exclude_pairs)
-].reset_index(drop=True)
-print(f"Filtered out {before - len(egemaps)} rows via {ISSUES_CSV.name}; remaining {egemaps.shape}")
+_BASE_RUNS: dict[str, list[str]] = {
+    "mean_predictor":       [],                              # Run 1: DO NOT RENAME. LOO mean of training PHQ-9 (no features).
+    "egemaps_only":         ["egemaps"],                     # Run 2: 88 eGeMAPS subject-mean acoustic features only.
+    "whisper_only":         ["whisper"],                     # Run 3: 16 whisper subject-mean transcript-derived features only.
+    "egemaps_demo":         ["egemaps", "demo"],             # Run 4: eGeMAPS + 3 demographics (age, gender_M, edu_years).
+    "whisper_demo":         ["whisper", "demo"],             # Run 5: whisper transcript features + 3 demographics.
+    "egemaps_whisper":      ["egemaps", "whisper"],          # Run 6: eGeMAPS + whisper
+    "egemaps_whisper_demo": ["egemaps", "whisper", "demo"],  # Run 7: eGeMAPS + whisper + demographics
+}
 
-# ---------------------------------------------------------------------------
-# Aggregate per-subject mean across the 88 egemaps features 
-# ---------------------------------------------------------------------------
+RUN_FEATURE_SOURCES: dict[str, list[str]] = { # all the runs this script will execute
+    **_BASE_RUNS, # the ones configured above
+    **make_per_task_runs(TASK_GROUPS), # contains configs for each of the task groups for egemaps and whisper: 
+                                       #       interview, passage_reading, picture_description, word_reading
 
-feature_cols = [c for c in egemaps.columns if c not in ("subject_id", "file_number")]
-subject_mean_88 = egemaps.groupby("subject_id")[feature_cols].mean()
-subject_mean_88 = subject_mean_88.loc[subject_info.index]
-print(f"Per-subject means: {subject_mean_88.shape}")
+    **make_per_valence_runs(VALENCES), # contains configs for each of the valences for egemaps and whisper:
+                                        #       positive, negative, neutral
+}
+KNOWN_RUNS: tuple[str, ...] = tuple(RUN_FEATURE_SOURCES.keys())
 
-# ---------------------------------------------------------------------------
-# Build feature matrix and target — no holdout split; nested LOO below
-# uses each of the 52 subjects as the held-out point exactly once
-# ---------------------------------------------------------------------------
+def main() -> int:
+    args, requested_runs = parse_and_validate_args(KNOWN_RUNS, description=__doc__)
+    if requested_runs is None:
+        # No --runs on the CLI → drop into the interactive menu.
+        requested_runs = prompt_user_for_runs(RUN_FEATURE_SOURCES)
+    # mean_predictor is the trivial baseline; auto-include if absent so its
+    # row is present in every output CSV by default.
+    requested_runs = ensure_mean_predictor_included(requested_runs, KNOWN_RUNS)
 
-X_all = subject_mean_88.to_numpy()              # (52, 88)
-y_all = subject_info["PHQ-9"].to_numpy()        # (52,)
+    # ----------------------------------------------------------------------
+    # Create a fresh timestamped results directory for this invocation.
+    # ----------------------------------------------------------------------
+    run_dir = make_run_results_dir()
+    output_results_csv     = run_dir / "svr_run_results.csv"
+    output_perm_csv        = run_dir / "svr_perm_importance.csv"
+    output_predictions_csv = run_dir / "svr_participant_results.csv"
+    print(f"Run results directory: {run_dir}")
 
-print(f"All subjects: X={X_all.shape}  groups={subject_info['group'].value_counts().to_dict()}  "
-      f"PHQ-9 range {y_all.min()}-{y_all.max()}")
+    # ----------------------------------------------------------------------
+    # Load + sanity-check data. Whisper, demographic, and any task / valence
+    # slice matrices are loaded lazily, scoped to the SELECTED runs only —
+    # not the full RUN_FEATURE_SOURCES table — so picking one ablation
+    # doesn't load matrices for the others.
+    # ----------------------------------------------------------------------
+    info, egemaps_subj, eg_counts = load_subject_info_and_egemaps()
 
-# ---------------------------------------------------------------------------
-# Pipeline: standardize → Elastic-Net feature selection → SVR-RBF
-# Wrapping all three steps in a Pipeline ensures every step refits per LOO
-# fold (no feature-selection leak). Inner GridSearchCV tunes SVR hyperparams.
-# Outer LOO via cross_val_predict gives 52 honest out-of-fold predictions.
-# Note: ElasticNet uses fixed alpha/l1_ratio (not ElasticNetCV) to keep the
-# nested CV tractable — tuning EN inside outer LOO is too expensive.
-# ---------------------------------------------------------------------------
+    feature_matrices, counts_by_modality, sample_size_warnings = (
+        load_feature_matrices_for_specs(
+            info=info,
+            egemaps_subj=egemaps_subj,
+            eg_counts=eg_counts,
+            requested_runs=requested_runs,
+            run_specs=RUN_FEATURE_SOURCES,
+            task_groups=TASK_GROUPS,
+            valences=VALENCES,
+        )
+    )
 
-pipe = Pipeline([
-    ("scale", StandardScaler()),
-    ("select", SelectFromModel(
-        ElasticNet(alpha=0.1, l1_ratio=0.7, max_iter=20000, random_state=42),
-        threshold=1e-10,
-    )),
-    ("svr", SVR(kernel="rbf")),
-])
+    # ----------------------------------------------------------------------
+    # Per-subject file coverage summary (exposes modality asymmetry).
+    # ----------------------------------------------------------------------
+    gap_pair = ("eGeMAPS", "whisper") if "whisper" in counts_by_modality else None
+    print_coverage_summary(counts_by_modality, gap_pair=gap_pair)
 
-inner = GridSearchCV(
-    pipe,
-    param_grid={
-        "svr__C":       [0.1, 1, 10, 100],
-        "svr__epsilon": [0.1, 0.5, 1.0, 2.0],
-        "svr__gamma":   ["scale", "auto"],
-    },
-    cv=LeaveOneOut(), scoring="neg_mean_squared_error", n_jobs=1,
-)
+    # ----------------------------------------------------------------------
+    # Sample-size guard — if any selected slice has subjects below the
+    # threshold (default 3 files), prompt the user to ack-or-abort before
+    # any nested-LOO work runs.
+    # ----------------------------------------------------------------------
+    prompt_for_sample_size_acknowledgment(sample_size_warnings)
 
-y_pred_oof = cross_val_predict(inner, X_all, y_all, cv=LeaveOneOut(), n_jobs=-1)
+    # ----------------------------------------------------------------------
+    # Build feature matrices for each run. Filtered to selected runs to match
+    # the lazy-loaded feature_matrices contents — building entries for
+    # unselected runs would KeyError on missing source matrices.
+    # ----------------------------------------------------------------------
+    selected_specs = {r: RUN_FEATURE_SOURCES[r] for r in requested_runs}
+    run_matrices = build_run_matrices(feature_matrices, selected_specs)
+    # PHQ-9 as a Series indexed by subject_id; run_one_configuration aligns it
+    # to each run's X.index per-run (sliced runs may drop subjects).
+    y_series = info["PHQ-9"].astype(float)
 
-# ---------------------------------------------------------------------------
-# Summary stats — nested-LOO metrics + leave-one-out mean baseline
-# ---------------------------------------------------------------------------
+    print_run_configurations(run_matrices, requested_runs)
 
-nested_rmse = np.sqrt(mean_squared_error(y_all, y_pred_oof))
-nested_mae  = mean_absolute_error(y_all, y_pred_oof)
-nested_r2   = r2_score(y_all, y_pred_oof)
-print(f"\nNested-LOO Pipeline (scale → EN-select → SVR)")
-print(f"  RMSE: {nested_rmse:.3f}  MAE: {nested_mae:.3f}  R²: {nested_r2:.3f}")
+    # ----------------------------------------------------------------------
+    # Run all selected runs
+    # ----------------------------------------------------------------------
+    results: dict[str, dict] = {}
+    for run_idx, run_name in enumerate(requested_runs):
+        results[run_name] = run_one_configuration(
+            run_name=run_name,
+            X_df=run_matrices[run_name],
+            y_series=y_series,
+            alpha=args.alpha,
+            n_jobs=args.n_jobs,
+            run_idx=run_idx,
+            n_runs=len(requested_runs),
+            n_perm_repeats=args.n_perm_repeats,
+        )
 
-baseline_pred = np.array([y_all[np.arange(len(y_all)) != i].mean() for i in range(len(y_all))])
-baseline_rmse = np.sqrt(mean_squared_error(y_all, baseline_pred))
-print(f"Mean-predictor baseline (leave-one-out): RMSE {baseline_rmse:.3f}")
-print(f"SVR {'beats' if (d := baseline_rmse - nested_rmse) > 0 else 'loses to'} mean baseline by {abs(d):.3f} RMSE")
+    # ----------------------------------------------------------------------
+    # Results summary + CSV outputs.
+    # ΔRMSE in the printed comparison table is anchored to mean_predictor
+    # whenever it's in the requested runs (which it almost always is, thanks
+    # to ensure_mean_predictor_included). When mean_predictor is absent, the
+    # ΔRMSE column is shown as '-' for every row. ΔRMSE is stdout-only — it
+    # is NOT a column in svr_run_results.csv.
+    # ----------------------------------------------------------------------
+    baseline_run = "mean_predictor" if "mean_predictor" in requested_runs else None
+    print_results_table(results, requested_runs, alpha=args.alpha, baseline_run=baseline_run)
+
+    save_results_csv(
+        results, requested_runs,
+        alpha=args.alpha,
+        output_path=output_results_csv,
+        run_specs=RUN_FEATURE_SOURCES,
+    )
+    print(f"\nPer-run results written to {output_results_csv}")
+
+    save_predictions_csv(
+        results, requested_runs,
+        output_path=output_predictions_csv,
+    )
+    print(f"Per-participant results+PIs written to {output_predictions_csv}")
+
+    # ----------------------------------------------------------------------
+    # Post-hoc inspection of the best NON-mean-predictor run (consumes
+    # precomputed per-run posthoc data, no recompute).
+    # ----------------------------------------------------------------------
+    run_posthoc_inspection(
+        requested_runs=requested_runs,
+        results=results,
+        output_perm_csv=output_perm_csv,
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
