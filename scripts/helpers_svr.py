@@ -433,7 +433,7 @@ def make_pipeline_default() -> Pipeline:
     return Pipeline([
         # Step 1: median impute (handles NaN MATTR-interview etc.).
         # Trained on the 51-subject inner training set, no leak.
-        ("impute", SimpleImputer(strategy="median")),
+        ("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
         # Step 2: zero-mean unit-variance scaling.
         ("scale",  StandardScaler()),
         # Step 3: ElasticNet selection. Threshold 1e-10 keeps any non-zero coef.
@@ -549,7 +549,7 @@ def make_pipeline_double_en() -> Pipeline:
     the same hyperparameters as the default pipeline's single round.
     """
     return Pipeline([
-        ("impute", SimpleImputer(strategy="median")),
+        ("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("scale",  StandardScaler()),
         ("select", DoubleElasticNetSelector(
             en_alpha=0.1,
