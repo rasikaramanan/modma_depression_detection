@@ -1,0 +1,27 @@
+\begin{table}[H]
+\caption{SVR feature-stream ablation across LOSO predictions ($n=52$). Best test RMSE in bold.}
+\label{tab:ablation}
+\vskip 0.10in
+\begin{center}
+\begin{small}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccc}
+\toprule
+Configuration         & Features & RMSE          & MAE  & $R^2$  \\
+\midrule
+Mean baseline         &   0      & 8.56          & 7.97 & -0.04  \\
+\addlinespace
+eGeMAPS only          &  88      & 7.46          & 6.03 &  0.21  \\
+\quad + demographics  &  91      & 6.89          & 5.59 &  0.33  \\
+\addlinespace
+Whisper only          &  16      & 7.98          & 6.72 &  0.10  \\
+\quad + demographics  &  19      & 7.64          & 6.49 &  0.17  \\
+\addlinespace
+eGeMAPS + Whisper     & 104      & 7.37          & 6.13 &  0.23  \\
+\quad + demographics  & 107      & \textbf{6.81} & 5.66 &  0.34  \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\vskip -0.15in
+\end{table}
