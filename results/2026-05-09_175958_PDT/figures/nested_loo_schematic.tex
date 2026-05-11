@@ -1,0 +1,68 @@
+% Requires in preamble:
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning, fit, arrows.meta, backgrounds, calc}
+%   amsmath (already loaded by icml2021).
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  box/.style       = {draw, rounded corners=2pt, align=center,
+                      inner sep=3pt, minimum height=5mm, fill=white},
+  pbox/.style      = {box, fill=blue!4, text width=58mm},
+  outerbox/.style  = {box, fill=gray!12, text width=66mm, font=\footnotesize\bfseries},
+  hobox/.style     = {box, fill=red!10,  text width=28mm},
+  trbox/.style     = {box, fill=blue!10, text width=33mm},
+  predbox/.style   = {box, fill=green!10, text width=78mm},
+  inhdr/.style     = {box, fill=blue!8, text width=66mm,
+                      font=\footnotesize\bfseries},
+  >={Stealth[length=1.4mm]},
+]
+
+% --- Outer fold layer ---
+\node[outerbox] (outer) {Outer fold $k \in \{1, \dots, 52\}$};
+
+\node[hobox, below left=3mm and 2mm of outer.south, anchor=north east]
+  (ho) {Held-out:\\ 1 subject};
+\node[trbox, below right=3mm and 2mm of outer.south, anchor=north west]
+  (tr) {Training:\\ 51 subjects};
+
+\draw[->] (outer.south) -- (ho.north);
+\draw[->] (outer.south) -- (tr.north);
+
+% --- Inner CV header ---
+\node[inhdr, below=8mm of outer.south, yshift=-7mm] (inhdr)
+  {Inner LOO CV on 51 training subjects\\\textnormal{(\texttt{GridSearchCV})}};
+
+\draw[->] (tr.south) -- (inhdr.north);
+
+% --- Pipeline (vertical) ---
+\node[pbox, below=2mm of inhdr.south] (impute) {Impute (median)};
+\node[pbox, below=1.5mm of impute]    (scale)  {StandardScaler};
+\node[pbox, below=1.5mm of scale]     (en)
+  {SelectFromModel\\(ElasticNet, $\alpha = 0.1$, $l_1 = 0.7$)};
+\node[pbox, below=1.5mm of en, align=left, inner sep=4pt]  (svr)
+  {SVR (RBF kernel) --- grid:\\[1pt]
+   \quad $C \in \{0.1,\, 1,\, 10,\, 100\}$\\
+   \quad $\epsilon \in \{0.1,\, 0.5,\, 1.0,\, 2.0\}$\\
+   \quad $\gamma \in \{\text{scale},\, \text{auto}\}$};
+
+\draw[->] (impute) -- (scale);
+\draw[->] (scale)  -- (en);
+\draw[->] (en)     -- (svr);
+
+% Background highlight enclosing the inner CV pipeline
+\begin{scope}[on background layer]
+  \node[draw, rounded corners=3pt, fill=blue!2,
+        fit=(inhdr) (impute) (scale) (en) (svr),
+        inner sep=3pt] (innerbox) {};
+\end{scope}
+
+% --- Refit / predict held-out k ---
+\node[predbox, below=4mm of innerbox.south] (predict)
+  {Refit best params on 51 training subjects \\ $\to$ predict held-out subject $k$};
+\draw[->] (innerbox.south) -- (predict.north);
+
+\end{tikzpicture}
+\caption{Nested leave-one-out evaluation pipeline.}
+\label{fig:nested-loo}
+\end{figure}
