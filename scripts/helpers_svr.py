@@ -142,14 +142,9 @@ PARAM_GRID = {
 # ---------------------------------------------------------------------------
 def normalize_subject_id(s) -> int:
     """
-    Convert a subject_id from any source representation into the canonical int
-    form used as the join key throughout this module. Handles the zero-padded
-    string convention from the MODMA metadata CSVs ('02010002' → 2010002) and
-    is also a no-op on already-int input. An empty / all-zero string maps to
-    0 — defensive, not expected in practice.
-
-    Used everywhere subject IDs cross a CSV/parquet boundary: load_subject_info,
-    build_egemaps_subject_matrix, build_whisper_subject_matrix.
+    Convert a subject_id from any source rep into int form used as the join key 
+    throughout. Handles the zero-padded string convention from the MODMA metadata CSVs 
+    ('02010002' → 2010002). 
     """
     s = str(s).lstrip("0")
     return int(s) if s else 0
@@ -160,9 +155,6 @@ def load_subject_info() -> pd.DataFrame:
     Load `data/metadata/subject_info_map.csv` (path: SUBJECT_INFO_CSV) into a
     DataFrame indexed by int subject_id, carrying PHQ-9 / group / demographic
     columns (age, gender, edu_years, plus the auxiliary clinical scales).
-
-    Wrapped by load_subject_info_and_egemaps for the standard load+align
-    flow used by both train scripts; rarely called directly elsewhere.
     """
     info = pd.read_csv(SUBJECT_INFO_CSV)
     info["subject_id"] = info["subject_id"].apply(normalize_subject_id)
@@ -171,12 +163,10 @@ def load_subject_info() -> pd.DataFrame:
 
 def make_run_results_dir() -> Path:
     """
-    Create and return a fresh, timestamped results directory under RESULTS_BASE_DIR.
+    Create and return a new timestamped results dir under RESULTS_BASE_DIR.
 
     Subdir name format: 'YYYY-MM-DD_HHMMSS_<TZ>' in Pacific time, e.g.
-    '2026-05-09_153021_PDT' (PDT in summer, PST in winter — Pacific time
-    automatically resolves the correct abbreviation). Falls back to a
-    counter-suffixed name if a same-second invocation collides.
+    '2026-05-09_153021_PDT' (PDT in summer, PST in winter)
     """
     now = datetime.now(PACIFIC_TZ)
     base = now.strftime("%Y-%m-%d_%H%M%S_%Z")
@@ -207,16 +197,12 @@ def _slug(s: str) -> str:
 
 def load_audio_file_map() -> pd.DataFrame:
     """
-    Load data/metadata/audio_file_map.csv — the global stimulus-definition
-    table mapping file_number → (task, valence). Each subject performs the
-    same set of files in the same order, so the table has no subject_id
-    column.
+    Load data/metadata/audio_file_map.csv 
 
-    Cleanup applied:
+    Apply cleanup:
       - file_number cast to int and used as the index.
       - task / valence columns whitespace-stripped and lowercased.
-      - empty-string valence → NaN (a few files in the MODMA protocol are
-        unvalenced, e.g. the phonetic Passage Reading and the TAT picture).
+      - empty-string valence → NaN (for tasks: 19 - Passage Reading, 29 - Picture Description)
 
     Returns:
       DataFrame indexed by file_number (int), with at least 'task' (str) and
@@ -241,13 +227,7 @@ def discover_task_groups(audio_file_map: pd.DataFrame) -> dict[str, set[int]]:
     Task names are slugified ('Word Reading' → 'word_reading') so they're
     safe to embed in source-name strings.
 
-    Insertion order: lexicographic on the slugified task name.
-
-    NOTE: returns set[int] (file_numbers), not set[tuple[int, int]] (subject,
-    file pairs). The audio file map is global per-file_number — every
-    subject performs the same files — so the per-subject expansion is
-    unnecessary and would just be a 52× cross-product. Subject scoping is
-    enforced at matrix-build time by the join with subject_info.
+    returns dict with each entry <sliggified task name>: <set(file_numbers)>
     """
     tasks = sorted(audio_file_map["task"].dropna().unique())
     return {
@@ -261,10 +241,7 @@ def discover_valences(audio_file_map: pd.DataFrame) -> dict[str, set[int]]:
     Map each unique non-null valence label → set of file_numbers with it.
     Files without a valence (NaN — see load_audio_file_map) are excluded.
 
-    Insertion order: lexicographic on the valence label.
-
-    Returns set[int] (file_numbers); see discover_task_groups for the
-    rationale on int-vs-tuple.
+    Returns dict with each entry <valence: >set(file_numbers)
     """
     valences = sorted(audio_file_map["valence"].dropna().unique())
     return {
@@ -283,11 +260,6 @@ def make_per_task_runs(
 
       f"egemaps_{t}_only": [f"egemaps_task_{t}"]
       f"whisper_{t}_only": [f"whisper_task_{t}"]
-
-    Insertion order: lexicographic by task name; egemaps run before whisper run
-    for each task. The two source-name strings (egemaps_task_<t>,
-    whisper_task_<t>) are dispatched by load_feature_matrices_for_specs to the
-    appropriate slice-aware builder.
     """
     runs: dict[str, list[str]] = {}
     for t in sorted(task_groups):
@@ -305,10 +277,6 @@ def make_per_valence_runs(
 
       f"egemaps_{v}_only": [f"egemaps_valence_{v}"]
       f"whisper_{v}_only": [f"whisper_valence_{v}"]
-
-    Insertion order: lexicographic by valence label; egemaps run before
-    whisper run for each valence. Same dispatch convention as
-    make_per_task_runs.
     """
     runs: dict[str, list[str]] = {}
     for v in sorted(valences):
@@ -407,11 +375,6 @@ def build_demographic_subject_features(info: pd.DataFrame) -> pd.DataFrame:
       demo_df: (n_subj, 3) DataFrame, columns
                ['demo__age', 'demo__gender_M', 'demo__edu_years'].
                gender is encoded as a single binary indicator (1 = M, 0 = F).
-
-    Note: an earlier version of this helper also returned auxiliary clinical
-    scales (CTQ-SF / LES / SSRS / GAD-7 / PSQI), but those were dropped because
-    GAD-7 (r=0.89) and PSQI (r=0.79) correlate too strongly with PHQ-9 to use
-    as model inputs under the project's speech-based-detection framing.
     """
     info = info.copy()
 
@@ -642,8 +605,7 @@ def nested_loo_predict(
 
     n is normally 52 (the full MODMA cohort), but may be smaller when X comes
     from a per-task / per-valence slice that drops subjects with zero
-    contributing files (see build_egemaps_subject_matrix /
-    build_whisper_subject_matrix `keep_files` semantics).
+    contributing files.
 
     Args:
       X, y:             feature matrix and PHQ-9 vector, both length n.
@@ -694,11 +656,7 @@ def nested_loo_predict(
 
 def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     """
-    Compute the three regression metrics reported per run: RMSE, MAE, R².
-    Called by run_one_configuration on the OOF prediction vector returned by
-    nested_loo_predict (or loo_mean_predictor_predictions for the mean
-    predictor). Returns a plain {str: float} dict; run_one_configuration
-    extends it with PI_coverage / PI_mean_width before storing on the result.
+    Compute the three regression metrics reported per run: RMSE, MAE, R²
     """
     return {
         "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
@@ -757,9 +715,6 @@ def loo_mean_predictor_predictions(y: np.ndarray) -> np.ndarray:
     """
     Return the leave-one-out mean-predictor's OOF predictions:
         pred[i] = mean(y[j] for j != i)
-
-    Plugged into the same evaluate() as the SVR runs so the comparison table
-    treats the mean predictor as a normal first-row run.
     """
     n = len(y)
     return np.array([y[np.arange(n) != i].mean() for i in range(n)])
@@ -882,7 +837,7 @@ def parse_and_validate_args(
     argv: list[str] | None = None,
 ) -> tuple[argparse.Namespace, list[str] | None]:
     """
-    First call inside the train-script main(): parse CLI args via
+    First call inside the train_svr main(): parse CLI args via
     build_arg_parser, then validate `--alpha ∈ (0, 1)` and that every entry
     of the parsed `--runs` list is in `known_runs`. Calls sys.exit(1) on
     validation failure (with an error printed to stderr).
@@ -916,7 +871,7 @@ def parse_and_validate_args(
 
 def parse_run_selection(text: str, n_runs: int) -> list[int]:
     """
-    Parse a menu selection string into a sorted, deduplicated list of 1-indexed
+    Parse a menu selection string into a sorted, deduped list of 1-indexed
     run numbers within [1, n_runs].
 
     Grammar:
@@ -979,9 +934,6 @@ def prompt_user_for_runs(
       - Invalid or empty input re-prompts (with a one-line error for invalid
         and an offending-number echo for out-of-range cases).
       - 'n' (or any non-yes confirmation) re-shows the menu.
-
-    The selection grammar is described inline in the input prompt; see
-    parse_run_selection for the full spec.
     """
     run_names = list(run_specs.keys())
     n = len(run_names)
@@ -991,9 +943,7 @@ def prompt_user_for_runs(
 
     while True:
         # Two-column layout: left column holds indices 1..n_left, right column
-        # holds the rest. For n=22 the rows are 1↔12, 2↔13, …, 11↔22; for n=23
-        # the rows are 1↔13, …, 12↔(blank). Drops the bracketed source list to
-        # keep the menu compact as RUN_FEATURE_SOURCES grows.
+        # holds the rest. 
         print()
         print("Available run configurations:")
         for row in range(n_left):
@@ -1031,15 +981,10 @@ def ensure_mean_predictor_included(
 ) -> list[str]:
     """
     Ensure 'mean_predictor' is in requested_runs (prepended) when it's a known
-    run. The mean predictor is virtually free to compute and provides the
-    trivial baseline that every SVR run is compared against — keeping it in
-    every CSV by default avoids a round trip when the user wants the baseline
-    for ΔRMSE later.
+    run. Prints a one-line note so the behavior is visible to the user.
 
-    No-op if 'mean_predictor' is not in known_runs (so a future train script
-    that doesn't define it isn't forced to). Returns a new list — does not
-    mutate the input. Prints a one-line note when it auto-includes so the
-    behavior is visible to the user.
+    No-op if 'mean_predictor' is not in known_runs -- returns a new list 
+    without modifying input
     """
     if "mean_predictor" not in known_runs:
         return list(requested_runs)
@@ -1055,17 +1000,10 @@ def ensure_mean_predictor_included(
 def load_subject_info_and_egemaps() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     """
     First step of the train-script load flow: load subject_info, build the
-    full-corpus eGeMAPS subject-mean matrix (no slicing), and align both
+     eGeMAPS subject-mean matrix (no slicing), and align both
     DataFrames to their intersection on subject_id (warning on any
     mismatch). Prints the standard "Loading data..." status block to stdout
     so the train script's output begins with a recognizable header.
-
-    eGeMAPS is loaded eagerly here because every train-script run uses it in
-    some form (full-corpus or per-task/valence slice) and the slice-aware
-    builds in load_feature_matrices_for_specs reuse the alignment performed
-    here. Whisper / demographic / per-task slice matrices are loaded lazily
-    by load_feature_matrices_for_specs based on the user's run selection.
-
     Returns:
       info:         DataFrame indexed by int subject_id, carrying PHQ-9,
                     group (HC / MDD), and demographic columns.
@@ -1135,18 +1073,12 @@ def load_feature_matrices_for_specs(
 ]:
     """
     Lazily load every feature-source matrix referenced by the SELECTED runs
-    (not the full RUN_FEATURE_SOURCES table). Replaces the older
-    load_whisper_aggregations_if_needed + load_demographics_if_needed pair.
+    (not the full RUN_FEATURE_SOURCES table).
 
     Dispatches by source-name pattern:
       "egemaps"                  → already passed in via egemaps_subj.
       "whisper"            → build_whisper_subject_matrix(keep_files=None,
                                        prefix="whisper"), expected_max=29.
-      "whisper_iv"               → build_whisper_subject_matrix(
-                                       keep_files=task_groups["interview"],
-                                       prefix="whisper_iv"), expected_max=18.
-                                   (Legacy alias; behavior identical to today's
-                                   whisper_iv slice.)
       "egemaps_task_<X>"         → build_egemaps_subject_matrix(
                                        keep_files=task_groups[X]).
                                    expected_max = len(task_groups[X]).
@@ -1266,10 +1198,8 @@ def prompt_for_sample_size_acknowledgment(warnings: list[str]) -> None:
     If `warnings` is non-empty, print a clearly-delimited block listing each
     warning and prompt the user to confirm proceeding. 'y' / 'yes' returns
     silently; anything else prints "Aborted." and exits with status 0.
-    KeyboardInterrupt is NOT caught — callers / users should be free to
-    Ctrl+C the run with the default Python behavior.
 
-    No-op (silent) when warnings is empty.
+    No-op when warnings is empty.
     """
     if not warnings:
         return
@@ -1290,7 +1220,7 @@ def print_coverage_summary(
 ) -> None:
     """
     Print the "Per-subject file coverage" block (modality asymmetry check)
-    in the train-script's standard output. Called from main() right after
+    in train_svr's standard output. Called from main() right after
     load_feature_matrices_for_specs returns its counts dict, so the block
     appears between the matrix-load status lines and the subsequent
     "Run configurations:" listing.
@@ -1312,9 +1242,7 @@ def print_coverage_summary(
     Why this matters: subjects with low audio quality (e.g., 02010036)
     contribute fewer whisper rows than acoustic rows, so their whisper-mean
     is computed from a smaller sample — the coverage block makes that
-    asymmetry visible before any modeling happens. Per-row formatting comes
-    from _summarize_counts (one line per modality, with a "subjects below
-    max" callout when counts.min() < expected_max).
+    asymmetry visible before any modeling happens. 
     """
     print("\nPer-subject file coverage (modality asymmetry check):")
     for label, (counts, expected_max) in counts_by_modality.items():
