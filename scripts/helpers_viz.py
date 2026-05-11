@@ -548,6 +548,69 @@ def plot_feature_counts(
 
 
 # ---------------------------------------------------------------------------
+# Figure 7 — PHQ-9 distribution in the audio sub-cohort (HC vs MDD)
+# ---------------------------------------------------------------------------
+PHQ9_GROUP_COLORS: dict[str, str] = {
+    "HC":  "#4C72B0",   # seaborn-deep blue (matches HC color used in plot_pred_vs_true)
+    "MDD": "#C44E52",   # seaborn-deep red  (matches MDD color used in plot_pred_vs_true)
+}
+
+
+def plot_phq9_distribution(
+    metadata_csv: str | Path,
+    *,
+    figsize: tuple[float, float] | None = None,
+) -> plt.Figure:
+    """
+    Stacked histogram of PHQ-9 scores in the MODMA audio sub-cohort, split by
+    HC vs MDD.  Uses the same blue/red pair as the per-subject scatter plots
+    so the HC↔blue, MDD↔red association is consistent across the report.
+    A dotted vertical line at PHQ-9 = 5 marks the MDD-cohort inclusion
+    threshold.
+
+    Parameters
+    ----------
+    metadata_csv:
+        Path to ``data/metadata/subject_info_map.csv`` (or equivalent).  Must
+        contain columns ``PHQ-9`` and ``group`` with values ``HC`` and ``MDD``.
+    figsize:
+        Override the default figure size.
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    df = pd.read_csv(_resolve(metadata_csv))
+    PHQ9_MAX = 27  # theoretical PHQ-9 max (9 items × 3 max each)
+    bins = range(0, PHQ9_MAX + 1)
+
+    hc  = df.loc[df["group"] == "HC",  "PHQ-9"].to_numpy()
+    mdd = df.loc[df["group"] == "MDD", "PHQ-9"].to_numpy()
+
+    fig, ax = plt.subplots(figsize=figsize or (7, 4))
+
+    ax.hist(
+        [hc, mdd], bins=bins, stacked=True,
+        color=[PHQ9_GROUP_COLORS["HC"], PHQ9_GROUP_COLORS["MDD"]],
+        edgecolor="white", linewidth=0.4,
+        label=[f"HC  (n={len(hc)})", f"MDD  (n={len(mdd)})"],
+    )
+
+    ax.axvline(
+        5, color="black", linestyle=":", linewidth=1.2,
+        label="MDD inclusion (≥5)",
+    )
+
+    ax.set_xlabel("PHQ-9 score")
+    ax.set_ylabel("Number of subjects")
+    ax.set_title(f"PHQ-9 distribution — MODMA audio sub-cohort (n={len(df)})")
+    ax.set_xticks([0, 5, 10, 15, 20, 25, 27])
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Table 1 — Model comparison
 # ---------------------------------------------------------------------------
 def table_model_comparison(
