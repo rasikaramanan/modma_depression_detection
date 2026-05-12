@@ -7,7 +7,6 @@ from typing import Dict, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-
 @dataclass(frozen=True)
 class MultiCalibrationUpdate:
     group_name: str
@@ -15,20 +14,17 @@ class MultiCalibrationUpdate:
     mean_residual_before: float
     applied_shift: float
 
-
 def _as_numpy_1d(values: Iterable[float], *, name: str) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     if arr.ndim != 1:
         raise ValueError(f"{name} must be a 1-D array-like, got shape {arr.shape}")
     return arr
 
-
 def _validate_same_length(**arrays: np.ndarray) -> int:
     lengths = {name: len(arr) for name, arr in arrays.items()}
     if len(set(lengths.values())) != 1:
         raise ValueError(f"All arrays must have the same length, got {lengths}")
     return next(iter(lengths.values()))
-
 
 def compute_score_bin_edges(scores: Iterable[float], *, n_bins: int) -> np.ndarray:
     if n_bins < 1:
@@ -53,7 +49,6 @@ def compute_score_bin_edges(scores: Iterable[float], *, n_bins: int) -> np.ndarr
         raise ValueError(f"Invalid score-bin edges: {edges}")
     return edges
 
-
 def _score_bin_masks_from_edges(
     scores: np.ndarray,
     *,
@@ -77,7 +72,6 @@ def _score_bin_masks_from_edges(
         right = float(interval.right)
         masks[f"{prefix}_{idx}=[{left:.2f}, {right:.2f}]"] = (cats == interval)
     return masks
-
 
 def build_group_masks(
     *,
@@ -149,7 +143,6 @@ def build_group_masks(
         if int(np.sum(mask)) >= min_group_size
     }
     return filtered
-
 
 def mean_multicalibrate(
     *,
@@ -234,7 +227,6 @@ def mean_multicalibrate(
         "group_masks": processed_masks,
     }
 
-
 def apply_multicalibration_updates(
     y_pred: Iterable[float],
     group_masks: Mapping[str, Iterable[bool]],
@@ -251,7 +243,6 @@ def apply_multicalibration_updates(
     if clip is not None:
         current = np.clip(current, clip[0], clip[1])
     return current
-
 
 def multicalibration_report(
     *,
@@ -294,7 +285,6 @@ def multicalibration_report(
     if report.empty:
         return report
     return report.sort_values(["abs_gap_after", "n"], ascending=[False, False])
-
 
 def demo_group_frame(
     *,
