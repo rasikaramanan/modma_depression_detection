@@ -1,0 +1,55 @@
+% Requires in preamble:
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning, fit, arrows.meta, backgrounds, calc}
+%   \definecolor{egemapsblue}{HTML}{4C72B0}
+%   \definecolor{whisperorange}{HTML}{DD8452}
+%   amsmath (already loaded by icml2021).
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  >={Stealth[length=1.6mm]},
+  box/.style    = {draw, rounded corners=2pt, align=center,
+                   inner sep=4pt, minimum height=12mm, fill=white},
+  egbox/.style  = {box, fill=egemapsblue!15, draw=egemapsblue!60},
+  whbox/.style  = {box, fill=whisperorange!22, draw=whisperorange!70},
+  wavbox/.style = {box, fill=gray!14, minimum width=18mm},
+  egout/.style  = {egbox, line width=0.7pt, draw=egemapsblue},
+  whout/.style  = {whbox, line width=0.7pt, draw=whisperorange!90!black},
+]
+
+% WAV (centered vertically between the two rows)
+\node[wavbox] (wav) at (0, 0) {WAV\\(per recording)};
+
+% --- eGeMAPS row (above) ---
+\node[egbox, anchor=west, text width=24mm] (eg1) at (1.8, 1.9) {openSMILE\\eGeMAPSv02};
+\node[egbox, right=3mm of eg1, text width=54mm, align=center]      (eg2)
+  {88 functionals\\\textit{F0, loudness, \mbox{MFCC 1--4}, \mbox{jitter}, shimmer, HNR, F1--F3, \mbox{alpha-ratio}, Hammarberg, spectral flux}};
+\node[egout, right=3mm of eg2, text width=30mm]                    (eg3)
+  {\textbf{88-d feature vector}\\\textit{subject-mean\\across files}};
+
+% --- Whisper row (below) ---
+\node[whbox, anchor=west, text width=24mm] (wh1) at (1.8, -1.9) {Whisper-large-v3\\(Mandarin)};
+\node[whbox, right=3mm of wh1, text width=34mm]                    (wh2)
+  {Transcript preprocessing\\\textit{NFKC $\to$ OpenCC \texttt{t2s}\\$\to$ FunASR ct-punc\\$\to$ spacy\_pkuseg}};
+\node[whbox, right=3mm of wh2, text width=32mm]                    (wh3)
+  {16 features\\\textit{5 lexical / 3 \mbox{syntactic} /\\ 8 sentiment}};
+\node[whout, right=3mm of wh3, text width=30mm]                    (wh4)
+  {\textbf{16-d feature vector}\\\textit{subject-mean\\across files}};
+
+% --- Branch arrows from WAV ---
+\draw[->, thick] (wav.east) -| ($(eg1.west)+(-4mm,0)$) -- (eg1.west);
+\draw[->, thick] (wav.east) -| ($(wh1.west)+(-4mm,0)$) -- (wh1.west);
+
+% --- Row arrows ---
+\draw[->] (eg1) -- (eg2);
+\draw[->] (eg2) -- (eg3);
+
+\draw[->] (wh1) -- (wh2);
+\draw[->] (wh2) -- (wh3);
+\draw[->] (wh3) -- (wh4);
+
+\end{tikzpicture}
+\caption{Audio feature-extraction pipeline.}
+\label{fig:feature-pipeline}
+\end{figure*}

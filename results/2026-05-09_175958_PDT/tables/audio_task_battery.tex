@@ -1,0 +1,30 @@
+% Requires \usepackage{booktabs} (already in report.tex).
+\begin{table*}[t]
+\caption{Audio recording structure by task.}
+\label{tab:audio-tasks}
+\vskip 0.10in
+\begin{center}
+\begin{small}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lp{6.2cm}cccccc}
+\toprule
+                    &                                                   &                    & \multicolumn{4}{c}{Valence}                  \\
+\cmidrule(lr){4-7}
+Task                & Description                                       & Recordings / subj. & POS & NEG & NEU & NA \\
+\midrule
+Interview           & Response to one interview question.                                                                                                                                                                                                                                  & 18 & 6 & 6 & 6 & 0 \\
+\addlinespace
+Passage Reading     & Read aloud ``The North Wind and the Sun'': a phonetically balanced fable from \emph{The Principles of the International Phonetic Association} (Chinese version), used worldwide in speech research because it samples the phoneme inventory of a language in a naturalistic narrative context. & 1  & 0 & 0 & 0 & 1 \\
+\addlinespace
+Word Reading        & 10 common Chinese words selected from Hongfei Lin's affective ontology corpus and the Chinese sentimental words extremum table.                                                                                                                                       & 6  & 2 & 2 & 2 & 0 \\
+\addlinespace
+Picture Description & Face image from CFAPS, plus a ``crying woman'' scene from the Thematic Apperception Test (TAT).                                                                                                                                                                      & 4  & 1 & 1 & 1 & 1 \\
+\bottomrule
+\end{tabular}\\[2pt]
+\begin{minipage}{\textwidth}
+\footnotesize \emph{Note.} Valence shorthand: POS = Positive, NEG = Negative, NEU = Neutral, NA = Unlabelled.
+\end{minipage}
+\end{small}
+\end{center}
+\vskip -0.15in
+\end{table*}

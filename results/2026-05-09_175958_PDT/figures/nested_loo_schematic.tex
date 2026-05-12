@@ -15,6 +15,14 @@
   predbox/.style   = {box, fill=green!10, text width=78mm},
   inhdr/.style     = {box, fill=blue!8, text width=66mm,
                       font=\footnotesize\bfseries},
+  gridhdr/.style   = {box, fill=violet!10, text width=72mm,
+                      font=\footnotesize\bfseries},
+  selbox/.style    = {box, fill=yellow!18, text width=66mm,
+                      font=\footnotesize\bfseries},
+  ihbox/.style     = {box, fill=red!10, text width=24mm, font=\footnotesize},
+  itbox/.style     = {box, fill=blue!10, text width=28mm, font=\footnotesize},
+  sidenote/.style  = {font=\scriptsize\itshape, text=gray!60!black,
+                      align=center, inner sep=1pt},
   >={Stealth[length=1.4mm]},
 ]
 
@@ -22,47 +30,67 @@
 \node[outerbox] (outer) {Outer fold $k \in \{1, \dots, 52\}$};
 
 \node[hobox, below left=3mm and 2mm of outer.south, anchor=north east]
-  (ho) {Held-out:\\ 1 subject};
+  (ho) {Held-out:\\ subject $k$};
 \node[trbox, below right=3mm and 2mm of outer.south, anchor=north west]
   (tr) {Training:\\ 51 subjects};
 
 \draw[->] (outer.south) -- (ho.north);
 \draw[->] (outer.south) -- (tr.north);
 
-% --- Inner CV header ---
-\node[inhdr, below=8mm of outer.south, yshift=-7mm] (inhdr)
-  {Inner LOO CV on 51 training subjects\\\textnormal{(\texttt{GridSearchCV})}};
+% --- Grid search header (middle layer of the three nested loops) ---
+\node[gridhdr, below=8mm of outer.south, yshift=-7mm] (gridhdr)
+  {Grid search over ($g \in \{1, \dots, 32\}$) HP value combinations of $C$, $\epsilon$, $\gamma$};
 
-\draw[->] (tr.south) -- (inhdr.north);
+\draw[->] (tr.south) -- (gridhdr.north);
 
-% --- Pipeline (vertical) ---
-\node[pbox, below=2mm of inhdr.south] (impute) {Impute (median)};
-\node[pbox, below=1.5mm of impute]    (scale)  {StandardScaler};
-\node[pbox, below=1.5mm of scale]     (en)
-  {SelectFromModel\\(ElasticNet, $\alpha = 0.1$, $l_1 = 0.7$)};
-\node[pbox, below=1.5mm of en, align=left, inner sep=4pt]  (svr)
-  {SVR (RBF kernel) --- grid:\\[1pt]
-   \quad $C \in \{0.1,\, 1,\, 10,\, 100\}$\\
-   \quad $\epsilon \in \{0.1,\, 0.5,\, 1.0,\, 2.0\}$\\
-   \quad $\gamma \in \{\text{scale},\, \text{auto}\}$};
+% --- Inner LOO header (nested inside the grid-search layer) ---
+\node[inhdr, below=3mm of gridhdr.south] (inhdr)
+  {Inner LOSO over 51 outer-training subjects ($j \in \{1, \dots, 51\}$) with HP value combination $g$} ;
 
-\draw[->] (impute) -- (scale);
-\draw[->] (scale)  -- (en);
+\draw[->] (gridhdr.south) -- (inhdr.north);
+
+% --- Inner-fold split (1 inner held-out + 50 inner training) ---
+\node[ihbox, below left=3mm and 2mm of inhdr.south, anchor=north east]
+  (ho_inner) {Inner held-out:\\ subject $j$};
+\node[itbox, below right=3mm and 2mm of inhdr.south, anchor=north west]
+  (tr_inner) {Inner training:\\ 50 subjects};
+
+\draw[->] (inhdr.south) -- (ho_inner.north);
+\draw[->] (inhdr.south) -- (tr_inner.north);
+
+% --- Pipeline (vertical, fits on 50 inner-training subjects) ---
+\node[pbox, below=8mm of inhdr.south, yshift=-4mm] (impute)
+  {Impute (median) and scale features};
+\node[pbox, below=1.5mm of impute] (en)
+  {Elastic Net feature selection};
+\node[pbox, below=1.5mm of en] (svr)
+  {SVR (RBF kernel) predicts inner held-out $j$};
+
+\draw[->] (tr_inner.south) to[out=-90, in=90] (impute.north);
+\draw[->] (impute) -- (en);
 \draw[->] (en)     -- (svr);
 
-% Background highlight enclosing the inner CV pipeline
+% Background highlight — inner-CV ring only (gridbox dashed square removed
+% per request; the grid-search layer is now conveyed by the violet header
+% alone).
 \begin{scope}[on background layer]
   \node[draw, rounded corners=3pt, fill=blue!2,
-        fit=(inhdr) (impute) (scale) (en) (svr),
+        fit=(inhdr) (ho_inner) (tr_inner)
+            (impute) (en) (svr),
         inner sep=3pt] (innerbox) {};
 \end{scope}
 
-% --- Refit / predict held-out k ---
-\node[predbox, below=4mm of innerbox.south] (predict)
-  {Refit best params on 51 training subjects \\ $\to$ predict held-out subject $k$};
-\draw[->] (innerbox.south) -- (predict.north);
+% --- Select best hyperparameters + refit on 51 outer-training subjects ---
+\node[selbox, below=4mm of innerbox.south] (select)
+  {Select $C^*, \epsilon^*, \gamma^*$ that minimize RMSE and refit on 51 training subjects};
+\draw[->] (innerbox.south) -- (select.north);
+
+% --- Predict outer held-out k ---
+\node[predbox, below=4mm of select.south] (predict)
+  {Predict held-out subject $k$};
+\draw[->] (select.south) -- (predict.north);
 
 \end{tikzpicture}
-\caption{Nested leave-one-out evaluation pipeline.}
+\caption{Nested leave-one-subject-out evaluation pipeline. HP abbreviates hyperparameter.}
 \label{fig:nested-loo}
 \end{figure}

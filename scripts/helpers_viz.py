@@ -55,6 +55,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -607,6 +608,102 @@ def plot_phq9_distribution(
     ax.set_xticks([0, 5, 10, 15, 20, 25, 27])
     ax.legend(loc="upper right")
     fig.tight_layout()
+    return fig
+
+
+def plot_demographics_distribution(
+    metadata_csv: str | Path,
+    *,
+    figsize: tuple[float, float] | None = None,
+) -> plt.Figure:
+    """
+    Three-panel stacked histogram of age, gender, and education-years in the
+    MODMA audio sub-cohort, split by HC vs MDD.  Uses the same blue/red HC/MDD
+    pair as ``plot_phq9_distribution`` so the colour semantics are consistent
+    across the report.
+
+    Parameters
+    ----------
+    metadata_csv:
+        Path to ``data/metadata/subject_info_map.csv`` (or equivalent).  Must
+        contain columns ``group`` (``HC``/``MDD``), ``age``, ``gender``
+        (``F``/``M``), and ``edu_years``.
+    figsize:
+        Override the default figure size.
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    df = pd.read_csv(_resolve(metadata_csv))
+
+    hc_mask  = df["group"] == "HC"
+    mdd_mask = df["group"] == "MDD"
+    n_hc, n_mdd = int(hc_mask.sum()), int(mdd_mask.sum())
+
+    hc_color  = PHQ9_GROUP_COLORS["HC"]
+    mdd_color = PHQ9_GROUP_COLORS["MDD"]
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize or (12, 3.5))
+
+    # --- Age ---
+    ax = axes[0]
+    age_bins = range(15, 56, 5)
+    ax.hist(
+        [df.loc[hc_mask, "age"], df.loc[mdd_mask, "age"]],
+        bins=age_bins, stacked=True,
+        color=[hc_color, mdd_color],
+        edgecolor="white", linewidth=0.4,
+    )
+    ax.set_xlabel("Age (years)")
+    ax.set_ylabel("Number of subjects")
+    ax.set_title("Age")
+    ax.set_xticks(list(age_bins))
+
+    # --- Gender (stacked bars over categorical F/M) ---
+    ax = axes[1]
+    genders = ["F", "M"]
+    hc_counts  = [int((hc_mask  & (df["gender"] == g)).sum()) for g in genders]
+    mdd_counts = [int((mdd_mask & (df["gender"] == g)).sum()) for g in genders]
+    x = list(range(len(genders)))
+    ax.bar(x, hc_counts, color=hc_color,
+           edgecolor="white", linewidth=0.4)
+    ax.bar(x, mdd_counts, bottom=hc_counts, color=mdd_color,
+           edgecolor="white", linewidth=0.4)
+    ax.set_xticks(x)
+    ax.set_xticklabels(genders)
+    ax.set_xlabel("Gender")
+    ax.set_ylabel("Number of subjects")
+    ax.set_title("Gender")
+
+    # --- Education ---
+    ax = axes[2]
+    edu_bins = range(6, 25, 2)
+    ax.hist(
+        [df.loc[hc_mask, "edu_years"], df.loc[mdd_mask, "edu_years"]],
+        bins=edu_bins, stacked=True,
+        color=[hc_color, mdd_color],
+        edgecolor="white", linewidth=0.4,
+    )
+    ax.set_xlabel("Education (years)")
+    ax.set_ylabel("Number of subjects")
+    ax.set_title("Education")
+    ax.set_xticks(list(edu_bins))
+
+    # Shared legend at the figure level (one entry per group)
+    hc_patch  = mpatches.Patch(color=hc_color,  label=f"HC  (n={n_hc})")
+    mdd_patch = mpatches.Patch(color=mdd_color, label=f"MDD  (n={n_mdd})")
+    fig.legend(
+        handles=[hc_patch, mdd_patch],
+        loc="upper right", bbox_to_anchor=(0.995, 0.995),
+        frameon=True, ncol=2,
+    )
+
+    fig.suptitle(
+        f"Demographic distributions — MODMA audio sub-cohort (n={len(df)})",
+        y=1.00,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     return fig
 
 
