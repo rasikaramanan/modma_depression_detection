@@ -1,5 +1,21 @@
 # Depression Detection Using the Multimodal Open Dataset for Mental Disorder Analysis (MODMA)
 
+## About
+
+Speech-based prediction of continuous PHQ-9 depression severity on MODMA. Two feature streams:
+
+- 88 eGeMAPS acoustic functionals from openSMILE
+- 16 lexical / syntactic / sentiment features from Whisper transcripts
+
+Both streams, plus demographics, are fed into a nested leave-one-subject-out SVR with ElasticNet feature selection, jackknife prediction intervals, and mean multi-calibration across age, gender, and education subgroups.
+
+Findings from the full run in `results/2026-05-11_102233_PDT/`:
+
+- Best configuration is eGeMAPS + Whisper + demographics: RMSE 6.81, MAE 5.66, R² 0.34, against a mean-predictor baseline of RMSE 8.56, R² −0.04.
+- Acoustic features beat linguistic ones, RMSE 7.46 vs. 7.98; the two streams combined reach 7.37.
+- Years of education is the top feature by permutation importance in every run that includes demographics.
+- Positive-valence material is the strongest single condition for both streams (RMSE 7.88 acoustic, 7.57 linguistic), negative valence the weakest (8.15, 9.54). Interview speech leads among task types.
+
 ## Repository layout
 
 ```
